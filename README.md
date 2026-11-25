@@ -1,6 +1,6 @@
 # Magic Mouse 中键
 
-为了方便在达芬奇调色软件使用中键进行色彩应用复制，给 Apple Magic Mouse 加一个可调的中键区域。用一根手指按下触控表面中央，即可触发鼠标中键。默认仅在 DaVinci Resolve 前台生效。
+为了方便使用Apple Magic Mouse的用户在达芬奇调色软件使用中键进行色彩应用复制，给 Apple Magic Mouse 加一个可调的中键区域。用一根手指按下触控表面中央，即可触发鼠标中键。默认仅在 DaVinci Resolve 前台生效。
 
 ## 安装与使用
 
