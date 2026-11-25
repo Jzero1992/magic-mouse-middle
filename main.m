@@ -41,6 +41,18 @@ static float zoneWidth = 0.24f;
 static float touchSnapshot(size_t *count, float *x);
 static CGEventType convertedDown;
 static NSString *connectionStatus;
+static BOOL useEnglish;
+
+static NSString *L(NSString *chinese) {
+    if (!useEnglish) return chinese;
+    static NSBundle *english;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURL *url = [NSBundle.mainBundle URLForResource:@"en" withExtension:@"lproj"];
+        if (url) english = [NSBundle bundleWithURL:url];
+    });
+    return [english localizedStringForKey:chinese value:chinese table:nil] ?: chinese;
+}
 static __weak NSView *clickTestView;
 static NSInteger lastTestButton = -1;
 static NSTimeInterval lastTestTime;
@@ -213,11 +225,11 @@ static void installTap(void) {
 }
 
 static NSString *conversionStatus(void) {
-    if (!enabled) return @"点击转换已关闭，请在菜单栏启用";
-    if (eventTap && CGEventTapIsEnabled(eventTap)) return @"点击转换已启用";
-    if (!AXIsProcessTrusted()) return @"系统尚未授予此副本「辅助功能」权限";
-    if (!CGPreflightListenEventAccess()) return @"系统尚未授予此副本「输入监控」权限";
-    return @"权限已通过，但系统未能启动点击转换";
+    if (!enabled) return L(@"点击转换已关闭，请在菜单栏启用");
+    if (eventTap && CGEventTapIsEnabled(eventTap)) return L(@"点击转换已启用");
+    if (!AXIsProcessTrusted()) return L(@"系统尚未授予此副本「辅助功能」权限");
+    if (!CGPreflightListenEventAccess()) return L(@"系统尚未授予此副本「输入监控」权限");
+    return L(@"权限已通过，但系统未能启动点击转换");
 }
 
 @interface RangePreview : NSView
@@ -275,21 +287,22 @@ static NSString *conversionStatus(void) {
 @property NSTextField *rangeValue;
 @property NSTextField *previewStatus;
 @property NSTextField *testStatus;
+@property NSTimer *previewTimer;
 @end
 
 @implementation Controller
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSUserDefaults *settings = NSUserDefaults.standardUserDefaults;
     [settings registerDefaults:@{@"enabled": @YES, @"width": @0.24}];
+    NSString *language = [settings stringForKey:@"interfaceLanguage"];
+    useEnglish = language ? [language isEqualToString:@"en"] :
+        ![NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"];
     enabled = [settings boolForKey:@"enabled"];
     globalMode = [settings boolForKey:@"global"];
     zoneWidth = fminf(.70f, fmaxf(.06f, [settings floatForKey:@"width"]));
 
     self.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
-    NSImage *mouseIcon = [NSImage imageWithSystemSymbolName:@"computermouse" accessibilityDescription:@"Magic Mouse 中键"];
-    self.item.button.image = mouseIcon;
-    if (!mouseIcon) self.item.button.title = @"中键";
-    self.item.button.toolTip = @"Magic Mouse 中键";
+    [self updateStatusItem];
     self.item.menu = [[NSMenu alloc] init];
     self.item.menu.delegate = self;
     NSNotificationCenter *workspace = NSWorkspace.sharedWorkspace.notificationCenter;
@@ -317,39 +330,79 @@ static NSString *conversionStatus(void) {
     [self performSelector:@selector(reconnect:) withObject:nil afterDelay:2];
 }
 
+- (void)updateStatusItem {
+    NSImage *mouseIcon = [NSImage imageWithSystemSymbolName:@"computermouse" accessibilityDescription:L(@"Magic Mouse 中键")];
+    self.item.button.image = mouseIcon;
+    self.item.button.title = mouseIcon ? @"" : L(@"中键");
+    self.item.button.toolTip = L(@"Magic Mouse 中键");
+}
+
+- (void)changeLanguage:(NSMenuItem *)sender {
+    BOOL english = [sender.representedObject isEqualToString:@"en"];
+    if (useEnglish == english) return;
+    useEnglish = english;
+    [NSUserDefaults.standardUserDefaults setObject:sender.representedObject forKey:@"interfaceLanguage"];
+    [self updateStatusItem];
+
+    BOOL reopen = self.settingsWindow.isVisible;
+    [self.previewTimer invalidate];
+    [self.settingsWindow close];
+    self.settingsWindow = nil;
+    if (reopen) [self showSettings:nil];
+}
+
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     [menu removeAllItems];
-    [menu addItemWithTitle:connectionStatus action:nil keyEquivalent:@""];
+    [menu addItemWithTitle:L(connectionStatus) action:nil keyEquivalent:@""];
     [menu addItemWithTitle:conversionStatus() action:nil keyEquivalent:@""];
-    NSMenuItem *toggle = [menu addItemWithTitle:@"启用单指中央按下" action:@selector(toggle:) keyEquivalent:@""];
+    NSMenuItem *toggle = [menu addItemWithTitle:L(@"启用单指中央按下") action:@selector(toggle:) keyEquivalent:@""];
     toggle.target = self;
     toggle.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
-    NSMenuItem *scope = [menu addItemWithTitle:@"仅在 DaVinci Resolve 生效" action:@selector(changeScope:) keyEquivalent:@""];
+    NSMenuItem *scope = [menu addItemWithTitle:L(@"仅在 DaVinci Resolve 生效") action:@selector(changeScope:) keyEquivalent:@""];
     scope.target = self;
     scope.state = globalMode ? NSControlStateValueOff : NSControlStateValueOn;
 
-    NSMenuItem *settings = [menu addItemWithTitle:@"设置…" action:@selector(showSettings:) keyEquivalent:@","];
+    NSMenuItem *settings = [menu addItemWithTitle:L(@"设置…") action:@selector(showSettings:) keyEquivalent:@","];
     settings.target = self;
+
+    NSMenuItem *language = [menu addItemWithTitle:L(@"语言 / Language") action:nil keyEquivalent:@""];
+    language.submenu = [[NSMenu alloc] init];
+    NSArray<NSString *> *titles = @[@"简体中文", @"English"];
+    NSArray<NSString *> *identifiers = @[@"zh-Hans", @"en"];
+    for (NSUInteger index = 0; index < titles.count; index++) {
+        NSMenuItem *option = [language.submenu addItemWithTitle:titles[index]
+            action:@selector(changeLanguage:) keyEquivalent:@""];
+        option.target = self;
+        option.representedObject = identifiers[index];
+        option.state = (useEnglish == (index == 1)) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
 
     [menu addItem:NSMenuItem.separatorItem];
     if (!eventTap) {
-        NSMenuItem *permissions = [menu addItemWithTitle:@"启用权限…" action:@selector(requestPermissions:) keyEquivalent:@""];
+        NSMenuItem *permissions = [menu addItemWithTitle:L(@"启用权限…") action:@selector(requestPermissions:) keyEquivalent:@""];
         permissions.target = self;
     }
-    NSMenuItem *resetPermissions = [menu addItemWithTitle:@"重置权限记录…" action:@selector(resetPermissions:) keyEquivalent:@""];
+    NSMenuItem *resetPermissions = [menu addItemWithTitle:L(@"重置权限记录…") action:@selector(resetPermissions:) keyEquivalent:@""];
     resetPermissions.target = self;
-    NSMenuItem *refresh = [menu addItemWithTitle:@"重新检测鼠标" action:@selector(reconnect:) keyEquivalent:@""];
+    NSMenuItem *refresh = [menu addItemWithTitle:L(@"重新检测鼠标") action:@selector(reconnect:) keyEquivalent:@""];
     refresh.target = self;
     [menu addItem:NSMenuItem.separatorItem];
-    NSMenuItem *about = [menu addItemWithTitle:@"关于 Magic Mouse 中键" action:@selector(showAbout:) keyEquivalent:@""];
+    NSMenuItem *about = [menu addItemWithTitle:L(@"关于 Magic Mouse 中键") action:@selector(showAbout:) keyEquivalent:@""];
     about.target = self;
-    NSMenuItem *quit = [menu addItemWithTitle:@"退出" action:@selector(terminate:) keyEquivalent:@"q"];
+    NSMenuItem *quit = [menu addItemWithTitle:L(@"退出") action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
 }
 
 - (void)showAbout:(id)sender {
     [NSApp activateIgnoringOtherApps:YES];
-    [NSApp orderFrontStandardAboutPanel:nil];
+    NSAlert *about = [[NSAlert alloc] init];
+    about.icon = NSApp.applicationIconImage;
+    about.messageText = L(@"Magic Mouse 中键");
+    NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    about.informativeText = [NSString stringWithFormat:@"%@\n%@", [NSString stringWithFormat:L(@"版本 %@"), version],
+                             L(@"设计与权利归 J.zero 所有")];
+    [about addButtonWithTitle:L(@"好")];
+    [about runModal];
 }
 
 - (void)toggle:(id)sender {
@@ -365,12 +418,12 @@ static NSString *conversionStatus(void) {
         self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 450, 435)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
             backing:NSBackingStoreBuffered defer:NO];
-        self.settingsWindow.title = @"Magic Mouse 中键设置";
+        self.settingsWindow.title = L(@"Magic Mouse 中键设置");
         self.settingsWindow.releasedWhenClosed = NO;
         [self.settingsWindow center];
         NSView *content = self.settingsWindow.contentView;
 
-        NSTextField *title = [NSTextField labelWithString:@"中央中键区域"];
+        NSTextField *title = [NSTextField labelWithString:L(@"中央中键区域")];
         title.font = [NSFont systemFontOfSize:24 weight:NSFontWeightSemibold];
         title.frame = NSMakeRect(28, 375, 394, 32);
         [content addSubview:title];
@@ -391,7 +444,7 @@ static NSString *conversionStatus(void) {
         self.testStatus.textColor = NSColor.secondaryLabelColor;
         [content addSubview:self.testStatus];
 
-        NSTextField *sliderLabel = [NSTextField labelWithString:@"横向宽度"];
+        NSTextField *sliderLabel = [NSTextField labelWithString:L(@"横向宽度")];
         sliderLabel.frame = NSMakeRect(28, 69, 88, 22);
         [content addSubview:sliderLabel];
 
@@ -399,7 +452,7 @@ static NSString *conversionStatus(void) {
                                                target:self action:@selector(sliderChanged:)];
         self.rangeSlider.continuous = YES;
         self.rangeSlider.frame = NSMakeRect(113, 66, 244, 27);
-        [self.rangeSlider setAccessibilityLabel:@"中央中键区域横向宽度"];
+        [self.rangeSlider setAccessibilityLabel:L(@"中央中键区域横向宽度")];
         [content addSubview:self.rangeSlider];
 
         self.rangeValue = [NSTextField labelWithString:@""];
@@ -408,18 +461,19 @@ static NSString *conversionStatus(void) {
         self.rangeValue.frame = NSMakeRect(365, 69, 57, 22);
         [content addSubview:self.rangeValue];
 
-        NSButton *reset = [NSButton buttonWithTitle:@"恢复默认" target:self action:@selector(resetWidth:)];
-        reset.frame = NSMakeRect(322, 22, 100, 30);
+        NSButton *reset = [NSButton buttonWithTitle:L(@"恢复默认") target:self action:@selector(resetWidth:)];
+        reset.frame = NSMakeRect(284, 22, 138, 30);
         [content addSubview:reset];
 
-        NSButton *refresh = [NSButton buttonWithTitle:@"重新检测鼠标" target:self action:@selector(reconnect:)];
-        refresh.frame = NSMakeRect(28, 22, 115, 30);
+        NSButton *refresh = [NSButton buttonWithTitle:L(@"重新检测鼠标") target:self action:@selector(reconnect:)];
+        refresh.frame = NSMakeRect(28, 22, 150, 30);
         [content addSubview:refresh];
 
-        NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
-            if (self.settingsWindow.isVisible) [self updateRangePreview];
+        __weak Controller *controller = self;
+        self.previewTimer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
+            if (controller.settingsWindow.isVisible) [controller updateRangePreview];
         }];
-        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+        [NSRunLoop.mainRunLoop addTimer:self.previewTimer forMode:NSRunLoopCommonModes];
     }
     [self updateRangePreview];
     [NSApp activateIgnoringOtherApps:YES];
@@ -434,19 +488,19 @@ static NSString *conversionStatus(void) {
     self.rangePreview.touchX = x;
     self.rangePreview.showsTouch = showTouch;
     self.rangePreview.needsDisplay = YES;
-    NSString *status = @"用一根手指触摸鼠标，查看横向位置";
-    if (!mouse) status = connectionStatus;
-    else if (active && count > 1) status = @"请只用一根手指触摸";
-    else if (showTouch) status = inCenter(count, x, zoneWidth) ? @"触点在中键区域内" : @"触点在中键区域外";
+    NSString *status = L(@"用一根手指触摸鼠标，查看横向位置");
+    if (!mouse) status = L(connectionStatus);
+    else if (active && count > 1) status = L(@"请只用一根手指触摸");
+    else if (showTouch) status = inCenter(count, x, zoneWidth) ? L(@"触点在中键区域内") : L(@"触点在中键区域外");
     if (![self.previewStatus.stringValue isEqualToString:status]) self.previewStatus.stringValue = status;
-    NSString *test = @"将光标移到上方图示，按下鼠标测试";
+    NSString *test = L(@"将光标移到上方图示，按下鼠标测试");
     if (!enabled || !eventTap || !CGEventTapIsEnabled(eventTap)) test = conversionStatus();
     if (NSProcessInfo.processInfo.systemUptime - lastTestTime < 3 && lastTestButton >= 0) {
         switch (lastTestButton) {
-            case 0: test = @"收到左键"; break;
-            case 1: test = @"收到右键"; break;
-            case 2: test = @"收到中键"; break;
-            default: test = @"收到其他鼠标按键"; break;
+            case 0: test = L(@"收到左键"); break;
+            case 1: test = L(@"收到右键"); break;
+            case 2: test = L(@"收到中键"); break;
+            default: test = L(@"收到其他鼠标按键"); break;
         }
     }
     if (![self.testStatus.stringValue isEqualToString:test]) self.testStatus.stringValue = test;
@@ -475,15 +529,15 @@ static NSString *conversionStatus(void) {
 - (void)resetPermissions:(id)sender {
     [NSApp activateIgnoringOtherApps:YES];
     NSAlert *confirmation = [[NSAlert alloc] init];
-    confirmation.messageText = @"重置 Magic Mouse 中键的权限记录？";
-    confirmation.informativeText = @"这会清除本工具的「辅助功能」和「输入监控」授权。重置后请重新打开本工具，并在菜单栏点「启用权限…」。";
-    [confirmation addButtonWithTitle:@"取消"];
-    [confirmation addButtonWithTitle:@"重置权限"];
+    confirmation.messageText = L(@"重置 Magic Mouse 中键的权限记录？");
+    confirmation.informativeText = L(@"这会清除本工具的「辅助功能」和「输入监控」授权。重置后请重新打开本工具，并在菜单栏点「启用权限…」。");
+    [confirmation addButtonWithTitle:L(@"取消")];
+    [confirmation addButtonWithTitle:L(@"重置权限")];
     if ([confirmation runModal] != NSAlertSecondButtonReturn) return;
 
     NSDictionary<NSString *, NSString *> *services = @{
-        @"Accessibility": @"辅助功能",
-        @"ListenEvent": @"输入监控"
+        @"Accessibility": L(@"辅助功能"),
+        @"ListenEvent": L(@"输入监控")
     };
     NSMutableArray<NSString *> *failed = [NSMutableArray array];
     for (NSString *service in services) {
@@ -501,15 +555,15 @@ static NSString *conversionStatus(void) {
 
     NSAlert *result = [[NSAlert alloc] init];
     if (failed.count) {
-        result.messageText = @"部分权限记录未能重置";
+        result.messageText = L(@"部分权限记录未能重置");
         result.informativeText = [NSString stringWithFormat:
-            @"请在「系统设置 → 隐私与安全性」中检查「%@」，移除此工具的旧条目，再重新打开本工具并授权。",
-            [failed componentsJoinedByString:@"」「"]];
+            L(@"请在「系统设置 → 隐私与安全性」中检查「%@」，移除此工具的旧条目，再重新打开本工具并授权。"),
+            [failed componentsJoinedByString:useEnglish ? @", " : @"」「"]];
     } else {
-        result.messageText = @"权限记录已重置";
-        result.informativeText = @"请从「应用程序」重新打开 Magic Mouse 中键，然后在菜单栏点「启用权限…」重新授权。";
+        result.messageText = L(@"权限记录已重置");
+        result.informativeText = L(@"请从「应用程序」重新打开 Magic Mouse 中键，然后在菜单栏点「启用权限…」重新授权。");
     }
-    [result addButtonWithTitle:@"退出工具"];
+    [result addButtonWithTitle:L(@"退出工具")];
     [result runModal];
     [NSApp terminate:nil];
 }
@@ -521,6 +575,10 @@ static NSString *conversionStatus(void) {
 @end
 
 static int selfTest(void) {
+    useEnglish = YES;
+    if (![L(@"设置…") isEqualToString:@"Settings…"]) return 1;
+    useEnglish = NO;
+    if (![L(@"设置…") isEqualToString:@"设置…"]) return 1;
     Contact contacts[] = {{.state = 4, .x = .5f}, {.state = 5, .x = .8f}};
     size_t count;
     float x;

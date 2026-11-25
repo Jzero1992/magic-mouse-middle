@@ -12,4 +12,7 @@ xcrun clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter -O2 -mmacosx-version-
   -arch arm64 -arch x86_64 -framework AppKit -framework ApplicationServices \
   main.m -o "$app/Contents/MacOS/MagicMouseMiddle"
 cp Info.plist "$app/Contents/Info.plist"
+mkdir -p "$app/Contents/Resources/en.lproj"
+cp en.lproj/Localizable.strings "$app/Contents/Resources/en.lproj/"
+
 codesign --force --sign - "$app"
